@@ -442,32 +442,90 @@ class OrchestratedConversationalSystem:
         self._current_execution = None
         self._last_final_state = None
         
-        # Initialize persistent checkpointer
+        # Initialize persistent checkpointer with hybrid approach
         db_cfg = self.session.get("checkpoint_db", os.getenv("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite"))
         
         try:
-            # Use session-based persistence for Streamlit compatibility
+            # Try SQLite first for robust persistence on Streamlit Cloud
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            
+            # Use absolute path to ensure persistence across deployments
+            if not os.path.isabs(db_cfg):
+                db_cfg = os.path.join(os.getcwd(), db_cfg)
+            
+            self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(f"sqlite:///{db_cfg}")
+            self.checkpointer = self._checkpointer_cm.__aenter__()
+            if asyncio.iscoroutine(self.checkpointer):
+                # Handle async context manager properly
+                self.checkpointer = None  # Will be set in _ensure_graph
+            self.session["checkpoint_info"] = f"sqlite-async: {db_cfg}"
+            if self.debug:
+                self.logger.info(f"Using AsyncSqliteSaver with database: {db_cfg}")
+                
+        except Exception as e:
+            if self.debug:
+                self.logger.warning(f"AsyncSqliteSaver failed ({e}), falling back to MemorySaver with disk backup")
+            
+            # Fallback to MemorySaver with enhanced disk persistence
             from langgraph.checkpoint.memory import MemorySaver
             self.checkpointer = MemorySaver()
             self._checkpointer_cm = None
             
-            # Try to restore checkpoints from session state
-            if hasattr(st, 'session_state') and hasattr(st.session_state, 'checkpoints'):
-                # Restore previous checkpoints
-                self.checkpointer.storage = dict(st.session_state.checkpoints)  # Make a copy
-                self.session["checkpoint_info"] = f"memory-saver (restored): {len(st.session_state.checkpoints)} checkpoints"
+            # Load checkpoints from disk if available (more persistent than session state)
+            checkpoint_file = Path("persistent_checkpoints.json")
+            restored_count = 0
+            try:
+                if checkpoint_file.exists():
+                    with open(checkpoint_file, 'r', encoding='utf-8') as f:
+                        stored_checkpoints = json.load(f)
+                    
+                    # Convert back from serializable format to checkpoint objects
+                    for key_str, checkpoint_data in stored_checkpoints.items():
+                        # Convert string key back to tuple if needed
+                        try:
+                            # Parse complex keys like "('thread_id', 'checkpoint_id')"
+                            if key_str.startswith("(") and key_str.endswith(")"):
+                                import ast
+                                key = ast.literal_eval(key_str)
+                            else:
+                                key = key_str
+                            
+                            # Recreate checkpoint object structure
+                            if isinstance(checkpoint_data, dict):
+                                # Create a simple checkpoint-like object
+                                class CheckpointWrapper:
+                                    def __init__(self, values):
+                                        self.values = values
+                                
+                                self.checkpointer.storage[key] = CheckpointWrapper(checkpoint_data)
+                            else:
+                                self.checkpointer.storage[key] = checkpoint_data
+                        except Exception as parse_error:
+                            if self.debug:
+                                self.logger.warning(f"Could not parse checkpoint key {key_str}: {parse_error}")
+                    
+                    restored_count = len(stored_checkpoints)
+                    if self.debug:
+                        self.logger.info(f"Restored {restored_count} checkpoints from disk file")
+            except Exception as disk_error:
                 if self.debug:
-                    print(f"[CHECKPOINT] Restored {len(st.session_state.checkpoints)} checkpoints from session")
-                    print(f"[CHECKPOINT] Checkpoint keys: {list(st.session_state.checkpoints.keys())}")
-            else:
-                # Initialize session state for checkpoints if it doesn't exist
+                    self.logger.warning(f"Could not restore from disk: {disk_error}")
+            
+            # Fallback to session state if disk failed
+            if restored_count == 0 and hasattr(st, 'session_state') and hasattr(st.session_state, 'checkpoints'):
+                self.checkpointer.storage = dict(st.session_state.checkpoints)
+                restored_count = len(st.session_state.checkpoints)
+                if self.debug:
+                    self.logger.info(f"Restored {restored_count} checkpoints from session state")
+            
+            # Initialize empty if nothing to restore
+            if restored_count == 0:
                 if hasattr(st, 'session_state'):
                     st.session_state.checkpoints = {}
-                self.session["checkpoint_info"] = f"memory-saver (new): session-based persistence"
                 if self.debug:
-                    print("[CHECKPOINT] Starting with empty checkpoints")
-            
-        except Exception as e:
+                    self.logger.info("Starting with empty checkpoints")
+                    
+            self.session["checkpoint_info"] = f"memory-saver with disk backup: {restored_count} checkpoints"
             # Fallback to in-memory if SQLite unavailable
             self.checkpointer = MemorySaver()
             self._checkpointer_cm = None
@@ -491,7 +549,21 @@ class OrchestratedConversationalSystem:
     async def _ensure_graph(self) -> None:
         """Ensure graph is compiled with checkpointer properly set up."""
         if self._graph is None:
-            # Checkpointer is already ready (MemorySaver)
+            # If using AsyncSqliteSaver, ensure it's properly initialized
+            if self._checkpointer_cm is not None and self.checkpointer is None:
+                try:
+                    self.checkpointer = await self._checkpointer_cm.__aenter__()
+                    if self.debug:
+                        self.logger.info("AsyncSqliteSaver context manager initialized")
+                except Exception as e:
+                    if self.debug:
+                        self.logger.error(f"Failed to initialize AsyncSqliteSaver: {e}")
+                    # Fallback to MemorySaver
+                    from langgraph.checkpoint.memory import MemorySaver
+                    self.checkpointer = MemorySaver()
+                    self._checkpointer_cm = None
+            
+            # Checkpointer is ready, build the graph
             self._graph = self._build_graph()
 
     @property
@@ -1056,53 +1128,74 @@ class OrchestratedConversationalSystem:
         """Handle background operations after response is returned."""
         try:
             if self.debug:
-                print("[BACKGROUND] Running post-turn operations...")
+                self.logger.debug("Running post-turn operations...")
             # Just flush memory operations - the actual memory additions happen during graph execution
             await self.store.flush()
             if self.debug:
-                print("[BACKGROUND] Post-turn operations completed")
+                self.logger.debug("Post-turn operations completed")
         except Exception as e:
             if self.debug:
-                print(f"[BACKGROUND] Error in post-turn operations: {e}")
+                self.logger.error(f"Error in post-turn operations: {e}")
 
     async def _background_memory_query(self, query: str):
         """Run memory query in background for future use."""
         try:
             if self.debug:
-                print(f"[BACKGROUND] Running delayed memory query for: {query[:50]}...")
+                self.logger.debug(f"Running delayed memory query for: {query[:50]}...")
             await self.store.rag_query(query, top_k=5, agent_id_filter="1")
             if self.debug:
-                print("[BACKGROUND] Delayed memory query completed")
+                self.logger.debug("Delayed memory query completed")
         except Exception as e:
             if self.debug:
-                print(f"[BACKGROUND] Delayed memory query error: {e}")
+                self.logger.error(f"Delayed memory query error: {e}")
 
     def _save_checkpoints_to_session(self):
-        """Save checkpoints to Streamlit session state for persistence across reloads."""
+        """Save checkpoints with enhanced persistence for Streamlit Cloud."""
         try:
-            if hasattr(st, 'session_state') and hasattr(self.checkpointer, 'storage'):
-                # Make sure we save a copy of the storage dict
-                st.session_state.checkpoints = dict(self.checkpointer.storage)
-                if self.debug:
-                    print(f"[CHECKPOINT] Saved {len(self.checkpointer.storage)} checkpoints to session")
-                    print(f"[CHECKPOINT] Saved checkpoint keys: {list(self.checkpointer.storage.keys())}")
-                    
-                    # Debug: look at the latest checkpoint content
-                    thread_id = self.session.get("thread_id", f"agent-{self.agent}")
+            if hasattr(self.checkpointer, 'storage'):
+                # Primary: Save to disk file for persistence across deployments
+                checkpoint_file = Path("persistent_checkpoints.json")
+                try:
+                    # Convert checkpoint storage to JSON-serializable format
+                    serializable_storage = {}
                     for key, checkpoint in self.checkpointer.storage.items():
-                        key_str = str(key)
-                        if thread_id in key_str:
-                            try:
-                                scratchpad = self._extract_scratchpad_from_checkpoint(checkpoint)
-                                print(f"[CHECKPOINT] Checkpoint {key_str} scratchpad length: {len(scratchpad) if scratchpad else 0}")
-                                if scratchpad:
-                                    print(f"[CHECKPOINT] Checkpoint {key_str} scratchpad: {scratchpad}")
-                            except Exception as e:
-                                print(f"[CHECKPOINT] Error inspecting checkpoint {key_str}: {e}")
-                            break
+                        # Convert checkpoint to serializable format
+                        if hasattr(checkpoint, 'values'):
+                            serializable_storage[str(key)] = checkpoint.values
+                        else:
+                            serializable_storage[str(key)] = checkpoint
+                    
+                    with open(checkpoint_file, 'w', encoding='utf-8') as f:
+                        json.dump(serializable_storage, f, ensure_ascii=False, indent=2)
+                    
+                    if self.debug:
+                        self.logger.info(f"Saved {len(serializable_storage)} checkpoints to disk file")
+                except Exception as disk_error:
+                    if self.debug:
+                        self.logger.warning(f"Failed to save checkpoints to disk: {disk_error}")
+                
+                # Secondary: Save to session state as backup
+                if hasattr(st, 'session_state'):
+                    st.session_state.checkpoints = dict(self.checkpointer.storage)
+                    if self.debug:
+                        self.logger.debug(f"Saved {len(self.checkpointer.storage)} checkpoints to session state")
+                        
+                        # Debug: look at the latest checkpoint content
+                        thread_id = self.session.get("thread_id", f"agent-{self.agent}")
+                        for key, checkpoint in self.checkpointer.storage.items():
+                            key_str = str(key)
+                            if thread_id in key_str:
+                                try:
+                                    scratchpad = self._extract_scratchpad_from_checkpoint(checkpoint)
+                                    self.logger.debug(f"Checkpoint {key_str} scratchpad length: {len(scratchpad) if scratchpad else 0}")
+                                    if scratchpad and self.debug:
+                                        self.logger.debug(f"Checkpoint {key_str} scratchpad: {scratchpad}")
+                                except Exception as e:
+                                    self.logger.warning(f"Error inspecting checkpoint {key_str}: {e}")
+                                break
         except Exception as e:
             if self.debug:
-                print(f"[CHECKPOINT] Error saving to session: {e}")
+                self.logger.error(f"Error saving checkpoints: {e}")
 
     def _persist_thread_to_disk(self, thread_id: str, state: AgentState):
         """Persist minimal thread state to disk keyed by tid."""
@@ -1183,9 +1276,11 @@ class OrchestratedConversationalSystem:
         if self._checkpointer_cm is not None and self.checkpointer is not None:
             try:
                 await self._checkpointer_cm.__aexit__(None, None, None)
+                if self.debug:
+                    self.logger.info("AsyncSqliteSaver context manager closed successfully")
             except Exception as e:
                 if self.debug:
-                    print(f"[CLEANUP] Error closing checkpointer: {e}")
+                    self.logger.error(f"Error closing checkpointer: {e}")
 
     def _build_system_prompt(self, selected_context: str, compressed_history: str) -> str:
         """Render the persona template with injected context, summary, and current time."""
