@@ -443,7 +443,7 @@ class OrchestratedConversationalSystem:
         self._last_final_state = None
         
         # Initialize persistent checkpointer (AsyncSqliteSaver) per Option A
-        db_cfg = self.session.get("checkpoint_db", os.getenv("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite"))
+        db_cfg = self.session.get("checkpoint_db", st.secrets.get("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite"))
         try:
             # Resolve to absolute file path if a plain filename/path was provided
             if "://" in str(db_cfg):
@@ -1299,6 +1299,7 @@ if __name__ == "__main__":
         asyncio.run(conv.store.flush())
         asyncio.run(conv._cleanup())
         raise
+
 
 
 
