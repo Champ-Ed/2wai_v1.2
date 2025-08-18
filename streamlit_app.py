@@ -159,6 +159,11 @@ else:
 _db_path = _resolve_db_path()
 os.environ["LANGGRAPH_CHECKPOINT_DB"] = _db_path
 
+# Debug: log the resolved path
+app_logger.info(f"Resolved DB path: {_db_path}")
+app_logger.info(f"DB path exists: {os.path.exists(_db_path)}")
+app_logger.info(f"Script directory: {os.path.dirname(__file__)}")
+
 # Session configuration
 session = {
     "api_key": st.secrets.get("OPENAI_API_KEY", ""),
@@ -184,7 +189,6 @@ Settings.embed_model = OpenAIEmbedding(
 
 # --- Init session state ---
 if "conv" not in st.session_state:
-    app_logger.info("Initializing new OrchestratedConversationalSystem")
     st.session_state.conv = OrchestratedConversationalSystem(session=session)
 else:
     # Keep the backend in sync with current thread and db if URL changed
@@ -193,9 +197,7 @@ else:
             "thread_id": st.session_state.thread_id,
             "checkpoint_db": _db_path,
         })
-        app_logger.debug(f"Updated conversation session with thread_id: {st.session_state.thread_id}")
-    except Exception as e:
-        app_logger.warning(f"Failed to update conversation session: {e}")
+    except Exception:
         pass
 
 if "state" not in st.session_state:
@@ -222,7 +224,6 @@ for msg in st.session_state.messages:
 # --- Chat input box ---
 if prompt := st.chat_input("Type your message and press Enter..."):
     # 1. Show user message instantly
-    app_logger.debug(f"User input received: '{prompt[:50]}...'")
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -230,52 +231,35 @@ if prompt := st.chat_input("Type your message and press Enter..."):
     # 2. Get assistant reply
     with st.chat_message("assistant"):
         with st.spinner("Calum is thinking..."):
-            try:
-                # Ensure thread_id is synced before processing
-                st.session_state.conv.session["thread_id"] = st.session_state.thread_id
-                app_logger.debug(f"Processing conversation with thread_id: {st.session_state.thread_id}")
-                new_state = asyncio.run(st.session_state.conv.run_turn_fast(prompt, st.session_state.state))
-                reply = new_state.get("response", "")
-                app_logger.debug(f"Assistant response generated: '{reply[:50]}...'")
-                st.markdown(reply)
+            # Ensure thread_id is synced before processing
+            st.session_state.conv.session["thread_id"] = st.session_state.thread_id
+            new_state = asyncio.run(st.session_state.conv.run_turn_fast(prompt, st.session_state.state))
+            reply = new_state.get("response", "")
+            st.markdown(reply)
 
-                # Save state + assistant message
-                st.session_state.state.update(new_state)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-            except Exception as e:
-                app_logger.error(f"Error during conversation processing: {e}")
-                st.error(f"An error occurred: {e}")
-                # Add fallback response
-                reply = "Sorry, I encountered an error. Please try again."
-                st.markdown(reply)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
+            # Save state + assistant message
+            st.session_state.state.update(new_state)
+            st.session_state.messages.append({"role": "assistant", "content": reply})
 
 # --- End Chat button ---
 col1, col2 = st.columns(2)
 with col1:
     if st.button("End Chat"):
+        asyncio.run(st.session_state.conv.store.flush())
+        st.session_state.messages.clear()
+        st.session_state.state = AgentState(session=session, scratchpad=[])
+        # Generate a new thread for a brand-new conversation and update URL
+        st.session_state.thread_id = str(uuid.uuid4())
         try:
-            app_logger.info("End Chat button pressed - clearing conversation")
-            asyncio.run(st.session_state.conv.store.flush())
-            st.session_state.messages.clear()
-            st.session_state.state = AgentState(session=session, scratchpad=[])
-            # Generate a new thread for a brand-new conversation and update URL
-            old_thread_id = st.session_state.thread_id
-            st.session_state.thread_id = str(uuid.uuid4())
-            app_logger.info(f"New conversation started: {old_thread_id} -> {st.session_state.thread_id}")
-            try:
-                st.query_params["tid"] = st.session_state.thread_id
-            except Exception as e:
-                app_logger.warning(f"Failed to update URL query params: {e}")
-            # Also sync backend session to new thread immediately
-            try:
-                st.session_state.conv.session["thread_id"] = st.session_state.thread_id
-            except Exception as e:
-                app_logger.warning(f"Failed to sync backend thread_id: {e}")
-            st.rerun()
-        except Exception as e:
-            app_logger.error(f"Error ending chat: {e}")
-            st.error(f"Error ending chat: {e}")
+            st.query_params["tid"] = st.session_state.thread_id
+        except Exception:
+            pass
+        # Also sync backend session to new thread immediately
+        try:
+            st.session_state.conv.session["thread_id"] = st.session_state.thread_id
+        except Exception:
+            pass
+        st.rerun()
 with col2:
     with st.popover("Admin"):
         db_path = _db_path
