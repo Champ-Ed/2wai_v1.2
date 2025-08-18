@@ -72,7 +72,8 @@ if "_resolve_db_path" not in globals():
             return val
 
         if not os.path.isabs(val):
-            return os.path.join(os.path.dirname(__file__), val)
+            # Use current working directory instead of __file__ dirname for Streamlit Cloud
+            return os.path.abspath(val)
 
         return val
 
@@ -159,10 +160,21 @@ else:
 _db_path = _resolve_db_path()
 os.environ["LANGGRAPH_CHECKPOINT_DB"] = _db_path
 
+# Ensure the parent directory exists for the database file
+try:
+    db_parent_dir = os.path.dirname(_db_path)
+    if db_parent_dir and not os.path.exists(db_parent_dir):
+        os.makedirs(db_parent_dir, exist_ok=True)
+        app_logger.info(f"Created directory: {db_parent_dir}")
+except Exception as e:
+    app_logger.warning(f"Could not create DB parent directory: {e}")
+
 # Debug: log the resolved path
 app_logger.info(f"Resolved DB path: {_db_path}")
 app_logger.info(f"DB path exists: {os.path.exists(_db_path)}")
 app_logger.info(f"Script directory: {os.path.dirname(__file__)}")
+app_logger.info(f"Current working directory: {os.getcwd()}")
+app_logger.info(f"Absolute path: {os.path.abspath(_db_path)}")
 
 # Session configuration
 session = {
