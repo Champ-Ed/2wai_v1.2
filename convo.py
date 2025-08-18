@@ -452,9 +452,31 @@ class OrchestratedConversationalSystem:
                 self._conn_str = self._db_path
             else:
                 abs_path = str(Path(db_cfg).expanduser().resolve())
-                # Ensure parent directory exists
-                Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
-                # Build aiosqlite conn string - use simple path for AsyncSqliteSaver
+                # Ensure parent directory exists with detailed logging
+                parent_dir = Path(abs_path).parent
+                print(f"[CHECKPOINT] Target DB path: {abs_path}")
+                print(f"[CHECKPOINT] Parent directory: {parent_dir}")
+                print(f"[CHECKPOINT] Parent exists: {parent_dir.exists()}")
+                print(f"[CHECKPOINT] Current working dir: {os.getcwd()}")
+                
+                try:
+                    parent_dir.mkdir(parents=True, exist_ok=True)
+                    print(f"[CHECKPOINT] Parent directory created/confirmed: {parent_dir}")
+                    print(f"[CHECKPOINT] Parent writable: {os.access(str(parent_dir), os.W_OK)}")
+                except Exception as mkdir_e:
+                    print(f"[CHECKPOINT] Failed to create parent directory: {mkdir_e}")
+                    raise
+                
+                # Test write permissions by creating a test file
+                test_file = parent_dir / "test_write.tmp"
+                try:
+                    test_file.write_text("test")
+                    test_file.unlink()
+                    print(f"[CHECKPOINT] Write test successful in {parent_dir}")
+                except Exception as write_e:
+                    print(f"[CHECKPOINT] Write test failed in {parent_dir}: {write_e}")
+                    raise
+                
                 self._db_path = abs_path
                 # AsyncSqliteSaver expects just the file path, not a full connection string
                 self._conn_str = abs_path
@@ -462,18 +484,16 @@ class OrchestratedConversationalSystem:
             self.checkpointer = None
             self._checkpointer_cm = None
             self.session["checkpoint_info"] = f"sqlite (async): {self._db_path}"
-            if self.debug:
-                print(f"[CHECKPOINT] Configured DB path: {self._db_path}")
-                print(f"[CHECKPOINT] Connection string: {self._conn_str}")
+            print(f"[CHECKPOINT] Configured DB path: {self._db_path}")
+            print(f"[CHECKPOINT] Connection string: {self._conn_str}")
         except Exception as e:
             # Fallback to in-memory if any path/resolve error
             self.checkpointer = MemorySaver()
             self._checkpointer_cm = None
             self.session["checkpoint_info"] = f"memory-saver fallback (init error: {type(e).__name__})"
-            if self.debug:
-                print(f"[CHECKPOINT] Init error: {e}")
-                import traceback
-                traceback.print_exc()
+            print(f"[CHECKPOINT] Init error: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Remove disk JSON persistence in Option A
         # self.disk_store = DiskTidStore(session.get("checkpoint_dir", "thread_checkpoints"), debug=self.debug)
@@ -500,12 +520,33 @@ class OrchestratedConversationalSystem:
                     db_path = getattr(self, '_db_path', '')
                     if db_path and not db_path.startswith('sqlite+aiosqlite://'):
                         parent_dir = str(Path(db_path).parent)
+                        print(f"[CHECKPOINT] Attempting to open AsyncSqliteSaver at: {db_path}")
+                        print(f"[CHECKPOINT] Parent directory: {parent_dir}")
+                        print(f"[CHECKPOINT] Parent directory exists: {os.path.exists(parent_dir) if parent_dir else 'N/A'}")
+                        print(f"[CHECKPOINT] Parent directory writable: {os.access(parent_dir, os.W_OK) if parent_dir and os.path.exists(parent_dir) else 'N/A'}")
+                        print(f"[CHECKPOINT] DB file exists: {os.path.exists(db_path)}")
+                        print(f"[CHECKPOINT] Connection string: {self._conn_str}")
+                        
                         if parent_dir and not os.path.exists(parent_dir):
                             os.makedirs(parent_dir, exist_ok=True)
                             print(f"[CHECKPOINT] Created directory: {parent_dir}")
-                        print(f"[CHECKPOINT] Attempting to open AsyncSqliteSaver at: {db_path}")
-                        print(f"[CHECKPOINT] Parent directory exists: {os.path.exists(parent_dir) if parent_dir else 'N/A'}")
-                        print(f"[CHECKPOINT] Connection string: {self._conn_str}")
+                    
+                    # Try to import aiosqlite to check if it's available
+                    try:
+                        import aiosqlite
+                        print(f"[CHECKPOINT] aiosqlite version: {aiosqlite.__version__}")
+                    except ImportError as import_e:
+                        print(f"[CHECKPOINT] aiosqlite import failed: {import_e}")
+                        raise
+                    
+                    # Try creating a test connection first
+                    try:
+                        async with aiosqlite.connect(self._conn_str) as test_conn:
+                            await test_conn.execute("SELECT 1")
+                            print(f"[CHECKPOINT] Direct aiosqlite connection test successful")
+                    except Exception as test_e:
+                        print(f"[CHECKPOINT] Direct aiosqlite connection test failed: {test_e}")
+                        raise
                     
                     self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(self._conn_str)
                     await self._checkpointer_cm.__aenter__()
@@ -514,6 +555,8 @@ class OrchestratedConversationalSystem:
                 except Exception as e:
                     # Fallback to memory saver if SQLite cannot be opened
                     print(f"[CHECKPOINT] AsyncSqliteSaver open failed: {e} -> falling back to MemorySaver")
+                    print(f"[CHECKPOINT] Error type: {type(e).__name__}")
+                    print(f"[CHECKPOINT] Error details: {str(e)}")
                     import traceback
                     traceback.print_exc()
                     self.checkpointer = MemorySaver()
