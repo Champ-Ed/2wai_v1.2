@@ -443,7 +443,7 @@ class OrchestratedConversationalSystem:
         self._last_final_state = None
         
         # Initialize persistent checkpointer (AsyncSqliteSaver) per Option A
-        db_cfg = self.session.get("checkpoint_db", st.secrets.get("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite"))
+        db_cfg = self.session.get("checkpoint_db", os.getenv("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite"))
         try:
             # Resolve to absolute file path if a plain filename/path was provided
             if "://" in str(db_cfg):
@@ -488,6 +488,19 @@ class OrchestratedConversationalSystem:
             # Initialize AsyncSqliteSaver if configured and not yet opened
             if getattr(self, "_checkpointer_cm", None) is None and getattr(self, "_conn_str", None):
                 try:
+                    # Double-check directory exists before opening SQLite
+                    db_path = getattr(self, '_db_path', '')
+                    if db_path and not db_path.startswith('sqlite+aiosqlite://'):
+                        parent_dir = str(Path(db_path).parent)
+                        if parent_dir and not os.path.exists(parent_dir):
+                            os.makedirs(parent_dir, exist_ok=True)
+                            if self.debug:
+                                print(f"[CHECKPOINT] Created directory: {parent_dir}")
+                        if self.debug:
+                            print(f"[CHECKPOINT] Attempting to open AsyncSqliteSaver at: {db_path}")
+                            print(f"[CHECKPOINT] Parent directory exists: {os.path.exists(parent_dir) if parent_dir else 'N/A'}")
+                            print(f"[CHECKPOINT] Connection string: {self._conn_str}")
+                    
                     self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(self._conn_str)
                     await self._checkpointer_cm.__aenter__()
                     self.checkpointer = self._checkpointer_cm
@@ -497,6 +510,8 @@ class OrchestratedConversationalSystem:
                     # Fallback to memory saver if SQLite cannot be opened
                     if self.debug:
                         print(f"[CHECKPOINT] AsyncSqliteSaver open failed: {e} -> falling back to MemorySaver")
+                        import traceback
+                        traceback.print_exc()
                     self.checkpointer = MemorySaver()
                     self._checkpointer_cm = None
                     self.session["checkpoint_info"] = f"memory-saver fallback (open error: {type(e).__name__})"
@@ -1299,8 +1314,6 @@ if __name__ == "__main__":
         asyncio.run(conv.store.flush())
         asyncio.run(conv._cleanup())
         raise
-
-
 
 
 
