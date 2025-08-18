@@ -477,6 +477,19 @@ class OrchestratedConversationalSystem:
                     print(f"[CHECKPOINT] Write test failed in {parent_dir}: {write_e}")
                     raise
                 
+                # Pre-create the SQLite file if it doesn't exist (like we do for log files)
+                db_file_path = Path(abs_path)
+                if not db_file_path.exists():
+                    try:
+                        # Create an empty SQLite database file
+                        db_file_path.touch()
+                        print(f"[CHECKPOINT] Created empty SQLite file: {abs_path}")
+                    except Exception as touch_e:
+                        print(f"[CHECKPOINT] Failed to create SQLite file: {touch_e}")
+                        raise
+                else:
+                    print(f"[CHECKPOINT] SQLite file already exists: {abs_path}")
+                
                 self._db_path = abs_path
                 # AsyncSqliteSaver expects just the file path, not a full connection string
                 self._conn_str = abs_path
