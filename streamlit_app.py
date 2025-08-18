@@ -166,8 +166,19 @@ try:
     if db_parent_dir and not os.path.exists(db_parent_dir):
         os.makedirs(db_parent_dir, exist_ok=True)
         app_logger.info(f"Created directory: {db_parent_dir}")
+    else:
+        app_logger.info(f"Directory already exists or empty: {db_parent_dir}")
 except Exception as e:
     app_logger.warning(f"Could not create DB parent directory: {e}")
+
+# Check directory permissions
+try:
+    db_parent_dir = os.path.dirname(_db_path)
+    if db_parent_dir:
+        app_logger.info(f"Directory writable: {os.access(db_parent_dir, os.W_OK)}")
+        app_logger.info(f"Directory readable: {os.access(db_parent_dir, os.R_OK)}")
+except Exception as e:
+    app_logger.warning(f"Could not check directory permissions: {e}")
 
 # Debug: log the resolved path
 app_logger.info(f"Resolved DB path: {_db_path}")
