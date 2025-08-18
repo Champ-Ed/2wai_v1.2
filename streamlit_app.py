@@ -65,30 +65,16 @@ from convo import OrchestratedConversationalSystem, AgentState
 # Define helpers if not already present (avoid duplicate definitions across edits)
 if "_resolve_db_path" not in globals():
     def _resolve_db_path() -> str:
-        """Resolve the SQLite file path used by LangGraph AsyncSqliteSaver.
-        Prefers st.secrets, then env. Ensures parent dir exists and returns absolute path.
-        Falls back to /tmp on read-only filesystems (Streamlit Cloud safe).
-        """
-        # Prefer secrets, fall back to env, then default
-        val = st.secrets.get("LANGGRAPH_CHECKPOINT_DB", os.environ.get("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite"))
-
-        # If user provided a connection string or URL, return as-is
-        if isinstance(val, str) and "://" in val:
+        """Resolve the SQLite file path used by LangGraph AsyncSqliteSaver."""
+        val = os.environ.get("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite")
+        # Don't process URLs further - AsyncSqliteSaver expects just a file path
+        if "://" in val:
             return val
 
-        # Build absolute path for plain file paths
-        p = Path(val)
-        if not p.is_absolute():
-            # Try CWD first
-            p = Path.cwd() / p
-        # Try to create parent dir; if it fails, use /tmp/langgraph
-        try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            return str(p)
-        except Exception:
-            tmp_dir = Path("/tmp/langgraph")
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            return str(tmp_dir / (p.name if p.suffix else (str(p.name) + ".sqlite")))
+        if not os.path.isabs(val):
+            return os.path.join(os.path.dirname(__file__), val)
+
+        return val
 
 
 if "_erase_thread_from_db" not in globals():
