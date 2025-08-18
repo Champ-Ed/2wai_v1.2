@@ -61,7 +61,7 @@ from convo import OrchestratedConversationalSystem, AgentState
 if "_resolve_db_path" not in globals():
     def _resolve_db_path() -> str:
         """Resolve the SQLite file path used by LangGraph AsyncSqliteSaver."""
-        val = os.environ.get("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite")
+        val = st.secrets.get("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite")
         # Don't process URLs further - AsyncSqliteSaver expects just a file path
         if "://" in val:
             return val
@@ -321,3 +321,4 @@ with col2:
                 st.caption(f"Last 3 entries: {current_sp[-3:] if len(current_sp) >= 3 else current_sp}")
         except Exception:
             pass
+
