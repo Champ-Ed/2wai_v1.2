@@ -449,23 +449,31 @@ class OrchestratedConversationalSystem:
             if "://" in str(db_cfg):
                 # Assume it's already a connection string or URL
                 self._db_path = str(db_cfg)
-                self._conn_str = self._db_path if self._db_path.startswith("sqlite+aiosqlite://") else self._db_path
+                self._conn_str = self._db_path
             else:
                 abs_path = str(Path(db_cfg).expanduser().resolve())
                 # Ensure parent directory exists
                 Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
-                # Build aiosqlite conn string
+                # Build aiosqlite conn string - use simple path for AsyncSqliteSaver
                 self._db_path = abs_path
-                self._conn_str = "sqlite+aiosqlite:///" + abs_path.replace("\\", "/")
+                # AsyncSqliteSaver expects just the file path, not a full connection string
+                self._conn_str = abs_path
             # Defer opening the async checkpointer until _ensure_graph
             self.checkpointer = None
             self._checkpointer_cm = None
             self.session["checkpoint_info"] = f"sqlite (async): {self._db_path}"
+            if self.debug:
+                print(f"[CHECKPOINT] Configured DB path: {self._db_path}")
+                print(f"[CHECKPOINT] Connection string: {self._conn_str}")
         except Exception as e:
             # Fallback to in-memory if any path/resolve error
             self.checkpointer = MemorySaver()
             self._checkpointer_cm = None
             self.session["checkpoint_info"] = f"memory-saver fallback (init error: {type(e).__name__})"
+            if self.debug:
+                print(f"[CHECKPOINT] Init error: {e}")
+                import traceback
+                traceback.print_exc()
         
         # Remove disk JSON persistence in Option A
         # self.disk_store = DiskTidStore(session.get("checkpoint_dir", "thread_checkpoints"), debug=self.debug)
@@ -494,24 +502,20 @@ class OrchestratedConversationalSystem:
                         parent_dir = str(Path(db_path).parent)
                         if parent_dir and not os.path.exists(parent_dir):
                             os.makedirs(parent_dir, exist_ok=True)
-                            if self.debug:
-                                print(f"[CHECKPOINT] Created directory: {parent_dir}")
-                        if self.debug:
-                            print(f"[CHECKPOINT] Attempting to open AsyncSqliteSaver at: {db_path}")
-                            print(f"[CHECKPOINT] Parent directory exists: {os.path.exists(parent_dir) if parent_dir else 'N/A'}")
-                            print(f"[CHECKPOINT] Connection string: {self._conn_str}")
+                            print(f"[CHECKPOINT] Created directory: {parent_dir}")
+                        print(f"[CHECKPOINT] Attempting to open AsyncSqliteSaver at: {db_path}")
+                        print(f"[CHECKPOINT] Parent directory exists: {os.path.exists(parent_dir) if parent_dir else 'N/A'}")
+                        print(f"[CHECKPOINT] Connection string: {self._conn_str}")
                     
                     self._checkpointer_cm = AsyncSqliteSaver.from_conn_string(self._conn_str)
                     await self._checkpointer_cm.__aenter__()
                     self.checkpointer = self._checkpointer_cm
-                    if self.debug:
-                        print(f"[CHECKPOINT] Opened AsyncSqliteSaver at {getattr(self, '_db_path', self._conn_str)}")
+                    print(f"[CHECKPOINT] Opened AsyncSqliteSaver at {getattr(self, '_db_path', self._conn_str)}")
                 except Exception as e:
                     # Fallback to memory saver if SQLite cannot be opened
-                    if self.debug:
-                        print(f"[CHECKPOINT] AsyncSqliteSaver open failed: {e} -> falling back to MemorySaver")
-                        import traceback
-                        traceback.print_exc()
+                    print(f"[CHECKPOINT] AsyncSqliteSaver open failed: {e} -> falling back to MemorySaver")
+                    import traceback
+                    traceback.print_exc()
                     self.checkpointer = MemorySaver()
                     self._checkpointer_cm = None
                     self.session["checkpoint_info"] = f"memory-saver fallback (open error: {type(e).__name__})"
