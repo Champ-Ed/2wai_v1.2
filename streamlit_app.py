@@ -49,19 +49,16 @@ def setup_streamlit_logger(debug: bool = False) -> logging.Logger:
 # Initialize logger early
 app_logger = setup_streamlit_logger(debug=os.getenv("DEBUG_CONVO") == "1")
 
-# Prefer Streamlit secrets for DB config before anything else
-try:
-    _secret_db = st.secrets.get("LANGGRAPH_CHECKPOINT_DB", "").strip()
-    if _secret_db:
-        os.environ["LANGGRAPH_CHECKPOINT_DB"] = _secret_db
-except Exception:
-    pass
-
 # LangSmith tracing (export env from Streamlit secrets) BEFORE importing convo
 os.environ.setdefault("LANGCHAIN_API_KEY", st.secrets.get("LANGCHAIN_API_KEY", ""))
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
 os.environ.setdefault("LANGCHAIN_PROJECT", "calum-worthy-chatbot")
 os.environ.setdefault("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
+
+# NEW: propagate LANGGRAPH_CHECKPOINT_DB from secrets to env BEFORE resolving paths
+_db_secret = st.secrets.get("LANGGRAPH_CHECKPOINT_DB", "")
+if _db_secret:
+    os.environ["LANGGRAPH_CHECKPOINT_DB"] = _db_secret
 
 from convo import OrchestratedConversationalSystem, AgentState
 
@@ -69,29 +66,29 @@ from convo import OrchestratedConversationalSystem, AgentState
 if "_resolve_db_path" not in globals():
     def _resolve_db_path() -> str:
         """Resolve the SQLite file path used by LangGraph AsyncSqliteSaver.
-        Prefers Streamlit secrets, then environment variable, else default.
-        Returns an absolute path and ensures parent directory exists.
+        Prefers st.secrets, then env. Ensures parent dir exists and returns absolute path.
+        Falls back to /tmp on read-only filesystems (Streamlit Cloud safe).
         """
-        # Prefer secrets if available
-        try:
-            val = st.secrets.get("LANGGRAPH_CHECKPOINT_DB", "").strip()
-        except Exception:
-            val = ""
-        if not val:
-            val = os.environ.get("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite")
+        # Prefer secrets, fall back to env, then default
+        val = st.secrets.get("LANGGRAPH_CHECKPOINT_DB", os.environ.get("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite"))
 
-        # If a DSN/URL is provided (e.g., sqlite+aiosqlite:///...), return as-is
-        if "://" in val:
+        # If user provided a connection string or URL, return as-is
+        if isinstance(val, str) and "://" in val:
             return val
 
-        # Make absolute relative to this file's directory
-        base_dir = Path(__file__).parent
-        abs_path = Path(val)
-        if not abs_path.is_absolute():
-            abs_path = (base_dir / val).resolve()
-        # Ensure directory exists
-        abs_path.parent.mkdir(parents=True, exist_ok=True)
-        return str(abs_path)
+        # Build absolute path for plain file paths
+        p = Path(val)
+        if not p.is_absolute():
+            # Try CWD first
+            p = Path.cwd() / p
+        # Try to create parent dir; if it fails, use /tmp/langgraph
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            return str(p)
+        except Exception:
+            tmp_dir = Path("/tmp/langgraph")
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            return str(tmp_dir / (p.name if p.suffix else (str(p.name) + ".sqlite")))
 
 
 if "_erase_thread_from_db" not in globals():
