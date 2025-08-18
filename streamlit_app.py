@@ -49,6 +49,14 @@ def setup_streamlit_logger(debug: bool = False) -> logging.Logger:
 # Initialize logger early
 app_logger = setup_streamlit_logger(debug=os.getenv("DEBUG_CONVO") == "1")
 
+# Prefer Streamlit secrets for DB config before anything else
+try:
+    _secret_db = st.secrets.get("LANGGRAPH_CHECKPOINT_DB", "").strip()
+    if _secret_db:
+        os.environ["LANGGRAPH_CHECKPOINT_DB"] = _secret_db
+except Exception:
+    pass
+
 # LangSmith tracing (export env from Streamlit secrets) BEFORE importing convo
 os.environ.setdefault("LANGCHAIN_API_KEY", st.secrets.get("LANGCHAIN_API_KEY", ""))
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
@@ -60,16 +68,30 @@ from convo import OrchestratedConversationalSystem, AgentState
 # Define helpers if not already present (avoid duplicate definitions across edits)
 if "_resolve_db_path" not in globals():
     def _resolve_db_path() -> str:
-        """Resolve the SQLite file path used by LangGraph AsyncSqliteSaver."""
-        val = st.secrets.get("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite")
-        # Don't process URLs further - AsyncSqliteSaver expects just a file path
+        """Resolve the SQLite file path used by LangGraph AsyncSqliteSaver.
+        Prefers Streamlit secrets, then environment variable, else default.
+        Returns an absolute path and ensures parent directory exists.
+        """
+        # Prefer secrets if available
+        try:
+            val = st.secrets.get("LANGGRAPH_CHECKPOINT_DB", "").strip()
+        except Exception:
+            val = ""
+        if not val:
+            val = os.environ.get("LANGGRAPH_CHECKPOINT_DB", "checkpoints.sqlite")
+
+        # If a DSN/URL is provided (e.g., sqlite+aiosqlite:///...), return as-is
         if "://" in val:
             return val
 
-        if not os.path.isabs(val):
-            return os.path.join(os.path.dirname(__file__), val)
-
-        return val
+        # Make absolute relative to this file's directory
+        base_dir = Path(__file__).parent
+        abs_path = Path(val)
+        if not abs_path.is_absolute():
+            abs_path = (base_dir / val).resolve()
+        # Ensure directory exists
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        return str(abs_path)
 
 
 if "_erase_thread_from_db" not in globals():
@@ -321,4 +343,3 @@ with col2:
                 st.caption(f"Last 3 entries: {current_sp[-3:] if len(current_sp) >= 3 else current_sp}")
         except Exception:
             pass
-
